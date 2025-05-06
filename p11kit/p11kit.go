@@ -22,7 +22,7 @@
 // Clients configure an environment variable, then dlopen the p11-kit-client.so
 // PKCS #11 shared library to communicate with the remote.
 //
-//     P11_KIT_SERVER_ADDRESS=unix:path=/run/user/12345/p11-kit/pkcs11-12345
+//	P11_KIT_SERVER_ADDRESS=unix:path=/run/user/12345/p11-kit/pkcs11-12345
 //
 // Normally the remote is served by the "p11-kit server ..." command.
 //
@@ -30,46 +30,45 @@
 // program to act as a PKCS #11 module. Users can load keys and certificates,
 // then listen on a unix socket to handle requests from p11-kit-client.so.
 //
-//     privObj, err := p11kit.NewPrivateKeyObject(priv)
-//     if err != nil {
-//         // ...
-//     }
-//     certObj, err := p11kit.NewX509CertificateObject(cert)
-//     if err != nil {
-//         // ...
-//     }
+//	privObj, err := p11kit.NewPrivateKeyObject(priv)
+//	if err != nil {
+//	    // ...
+//	}
+//	certObj, err := p11kit.NewX509CertificateObject(cert)
+//	if err != nil {
+//	    // ...
+//	}
 //
-//     slot := p11kit.Slot{
-//         ID:      0x01,
-//         Objects: []p11kit.Object{privObj, certObj},
-//         // Additional fields...
-//     }
+//	slot := p11kit.Slot{
+//	    ID:      0x01,
+//	    Objects: []p11kit.Object{privObj, certObj},
+//	    // Additional fields...
+//	}
 //
-//     h := p11kit.Handler{
-//         Manufacturer:   "example",
-//         Library:        "example",
-//         LibraryVersion: p11kit.Version{Major: 0, Minor: 1},
-//         Slots:          []p11kit.Slot{slot},
-//     }
+//	h := p11kit.Handler{
+//	    Manufacturer:   "example",
+//	    Library:        "example",
+//	    LibraryVersion: p11kit.Version{Major: 0, Minor: 1},
+//	    Slots:          []p11kit.Slot{slot},
+//	}
 //
-//     l, err := net.Listen("unix", "/run/user/12345/p11-kit/pkcs11-12345")
-//     if err != nil {
-//         // ...
-//     }
-//     defer l.Close()
-//     for {
-//         conn, err := l.Accept()
-//         if err != nil {
-//             // ...
-//         }
-//         go func() {
-//             if err := h.Handle(conn); err != nil {
-//                 log.Println(err)
-//             }
-//             conn.Close()
-//         }()
-//     }
-//
+//	l, err := net.Listen("unix", "/run/user/12345/p11-kit/pkcs11-12345")
+//	if err != nil {
+//	    // ...
+//	}
+//	defer l.Close()
+//	for {
+//	    conn, err := l.Accept()
+//	    if err != nil {
+//	        // ...
+//	    }
+//	    go func() {
+//	        if err := h.Handle(conn); err != nil {
+//	            log.Println(err)
+//	        }
+//	        conn.Close()
+//	    }()
+//	}
 package p11kit
 
 import (
@@ -166,6 +165,8 @@ type Handler struct {
 	// token, and generally doesn't attempt to differentiate symantically between
 	// slots and tokens.
 	Slots []Slot
+
+	Login func(pin []byte) error
 }
 
 // handler holds per-connection data and multable state for a given client.
@@ -340,6 +341,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 		callSignUpdate:        h.handleSignUpdate,
 		callSignFinal:         h.handleSignFinal,
 		callGetSessionInfo:    h.handleGetSessionInfo,
+		callLogin:             h.handleLogin,
 	}
 
 	for !done {
@@ -856,6 +858,40 @@ func (h *handler) handleGetSessionInfo(req *body) (*body, error) {
 	resp.writeUlong(state)          // state
 	resp.writeUlong(flags)          // flags
 	resp.writeUlong(0)              // ulDeviceError
+	return resp, nil
+}
+
+func (h *handler) handleLogin(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L1094
+	var (
+		sessionID uint64
+		userType  uint64
+		pin       []byte
+		pinLen    uint32
+	)
+
+	req.readUlong(&sessionID)
+	req.readUlong(&userType)
+	req.readByteArray(&pin, &pinLen)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+
+	_, err := h.session(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := newResponse(req)
+	if h.s.Login != nil {
+		err = h.s.Login(pin)
+
+		if err != nil {
+			resp.writeUlong(uint64(errPINIncorrect))
+		}
+	} else {
+		resp.writeUlong(uint64(errFunctionNotSupported))
+	}
 	return resp, nil
 }
 
