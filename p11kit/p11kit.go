@@ -166,7 +166,8 @@ type Handler struct {
 	// slots and tokens.
 	Slots []Slot
 
-	Login func(pin []byte) error
+	Login  func(pin []byte) error
+	Logout func() error
 }
 
 // handler holds per-connection data and multable state for a given client.
@@ -248,7 +249,8 @@ type session struct {
 	signObject    Object
 	signData      []byte
 
-	slotID uint64
+	slotID   uint64
+	loggedIn bool
 }
 
 // attributeValue returns the attribute values for the provided objectID and
@@ -342,6 +344,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 		callSignFinal:         h.handleSignFinal,
 		callGetSessionInfo:    h.handleGetSessionInfo,
 		callLogin:             h.handleLogin,
+		callLogout:            h.handleLogout,
 	}
 
 	for !done {
@@ -877,21 +880,59 @@ func (h *handler) handleLogin(req *body) (*body, error) {
 		return nil, err
 	}
 
-	_, err := h.session(sessionID)
+	session, err := h.session(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
 	resp := newResponse(req)
+	if session.loggedIn {
+		resp.writeUlong(uint64(errUserAlreadyLoggedIn))
+		return resp, nil
+	}
+
 	if h.s.Login != nil {
 		err = h.s.Login(pin)
-
 		if err != nil {
 			resp.writeUlong(uint64(errPINIncorrect))
+		} else {
+			session.loggedIn = true
 		}
 	} else {
 		resp.writeUlong(uint64(errFunctionNotSupported))
 	}
+	return resp, nil
+}
+
+func (h *handler) handleLogout(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L1109
+	var (
+		sessionID uint64
+	)
+	req.readUlong(&sessionID)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+
+	session, err := h.session(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := newResponse(req)
+
+	if !session.loggedIn {
+		resp.writeUlong(uint64(errUserNotLoggedIn))
+		return resp, nil
+	}
+
+	if h.s.Logout != nil {
+		err = h.s.Logout()
+		if err != nil {
+			resp.writeUlong(uint64(errFunctionFailed))
+		}
+	}
+	session.loggedIn = false
 	return resp, nil
 }
 
